@@ -1,14 +1,14 @@
 version: '3.8'
+
 services:
   db:
-    image: mysql:8.0.35
+    image: mysql:8.0.35      # ✅ CPU-safe version
     container_name: mysql-db
     environment:
       MYSQL_ROOT_PASSWORD: pass@321
       MYSQL_DATABASE: student_enrollment
     volumes:
       - db_data:/var/lib/mysql
-      # Only include next line if file definitely exists and is valid
       # - ./database.sql:/docker-entrypoint-initdb.d/database.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -ppass@321 --silent"]
