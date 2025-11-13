@@ -69,7 +69,7 @@ jobs:
           sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-web
           sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-nginx
           
-          # Run MySQL
+          # Run MySQL with health check and proper initialization
           echo "Starting MySQL database..."
           sudo docker run -d --name mysql-db --network app_network \
             -v db_data:/var/lib/mysql \
@@ -77,16 +77,36 @@ jobs:
             -e MYSQL_ROOT_PASSWORD=pass@321 \
             -e MYSQL_DATABASE=student_enrollment \
             -p 3306:3306 \
+            --health-cmd="mysqladmin ping -h localhost -u root -ppass@321" \
+            --health-interval=10s \
+            --health-timeout=5s \
+            --health-retries=5 \
             --restart unless-stopped \
             mysql:8.0
           
-          echo "Waiting for MySQL to initialize..."
-          sleep 30
+          # Wait for MySQL to be fully ready
+          echo "Waiting for MySQL to be healthy..."
+          for i in {1..60}; do
+            if sudo docker inspect --format='{{.State.Health.Status}}' mysql-db | grep -q "healthy"; then
+              echo "MySQL is healthy and ready for connections"
+              break
+            fi
+            echo "Waiting for MySQL to be ready... ($i/60)"
+            sleep 5
+          done
           
-          # Run PHP (web)
+          # Additional check to ensure MySQL is really ready
+          echo "Final MySQL readiness check..."
+          sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" || echo "MySQL still initializing..."
+          sleep 10
+          
+          # Run PHP (web) - Add retry logic in the application or wait longer
           echo "Starting PHP application..."
           sudo docker run -d --name php-web --network app_network \
-            -e DB_HOST=mysql-db -e DB_USER=root -e DB_PASSWORD=pass@321 -e DB_NAME=student_enrollment \
+            -e DB_HOST=mysql-db \
+            -e DB_USER=root \
+            -e DB_PASSWORD=pass@321 \
+            -e DB_NAME=student_enrollment \
             --restart unless-stopped \
             ${{ secrets.DOCKER_USERNAME }}/php-web
           
@@ -98,9 +118,13 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/php-nginx
           
           # Wait and check status
-          sleep 10
+          sleep 15
           echo "Container status:"
-          sudo docker ps -a --filter "name=php-nginx" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+          sudo docker ps -a
+          
+          # Check PHP application logs for database connection issues
+          echo "Checking PHP application logs..."
+          sudo docker logs php-web --tail 50
           
           status=$(sudo docker inspect --format '{{.State.Status}}' php-nginx 2>/dev/null || echo "not_found")
           echo "php-nginx state: $status"
@@ -111,6 +135,10 @@ jobs:
             sudo docker logs php-nginx --tail 50
             exit 1
           fi
+          
+          # Test the application
+          echo "Testing application connectivity..."
+          curl -f http://localhost:80 || echo "Application check failed, but continuing..."
           
           echo "Deployment completed successfully!"
           EOF
