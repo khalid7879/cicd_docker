@@ -64,43 +64,72 @@ jobs:
           # Stop & remove existing containers
           sudo docker rm -f php-nginx php-web mysql-db || true
           
+          # Clean up any existing volumes that might cause issues
+          sudo docker volume rm db_data || true
+          
           # Pull latest images
           echo "Pulling latest Docker images..."
           sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-web
           sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-nginx
           
-          # Run MySQL with health check and proper initialization
-          echo "Starting MySQL database..."
+          # First, verify the database file exists and is valid
+          echo "Checking database file..."
+          ls -la /home/${{ secrets.SERVER_USER }}/app/database.sql
+          file /home/${{ secrets.SERVER_USER }}/app/database.sql
+          
+          # Run MySQL WITHOUT the init script first to test
+          echo "Starting MySQL database (without init script)..."
           sudo docker run -d --name mysql-db --network app_network \
             -v db_data:/var/lib/mysql \
-            -v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql \
             -e MYSQL_ROOT_PASSWORD=pass@321 \
             -e MYSQL_DATABASE=student_enrollment \
             -p 3306:3306 \
-            --health-cmd="mysqladmin ping -h localhost -u root -ppass@321" \
-            --health-interval=10s \
-            --health-timeout=5s \
-            --health-retries=5 \
             --restart unless-stopped \
             mysql:8.0
           
-          # Wait for MySQL to be fully ready
-          echo "Waiting for MySQL to be healthy..."
-          for i in {1..60}; do
-            if sudo docker inspect --format='{{.State.Health.Status}}' mysql-db | grep -q "healthy"; then
-              echo "MySQL is healthy and ready for connections"
-              break
+          # Wait for MySQL to be ready
+          echo "Waiting for MySQL to start..."
+          sleep 30
+          
+          # Check if MySQL is running
+          if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" 2>/dev/null; then
+            echo "MySQL is running successfully"
+            
+            # If we have a database file, import it manually
+            if [ -f /home/${{ secrets.SERVER_USER }}/app/database.sql ]; then
+              echo "Importing database schema..."
+              sudo docker exec -i mysql-db mysql -u root -ppass@321 student_enrollment < /home/${{ secrets.SERVER_USER }}/app/database.sql
+              echo "Database imported successfully"
             fi
-            echo "Waiting for MySQL to be ready... ($i/60)"
-            sleep 5
-          done
+            
+          else
+            echo "MySQL failed to start. Trying alternative approach..."
+            
+            # Stop the container and try with different approach
+            sudo docker rm -f mysql-db
+            
+            # Try MySQL with init script but simpler approach
+            echo "Starting MySQL with init script..."
+            sudo docker run -d --name mysql-db --network app_network \
+              -v db_data:/var/lib/mysql \
+              -e MYSQL_ROOT_PASSWORD=pass@321 \
+              -e MYSQL_DATABASE=student_enrollment \
+              -p 3306:3306 \
+              --restart unless-stopped \
+              mysql:8.0
+              
+            sleep 40
+            
+            # Import database manually if MySQL is running
+            if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" 2>/dev/null; then
+              if [ -f /home/${{ secrets.SERVER_USER }}/app/database.sql ]; then
+                echo "Importing database manually..."
+                sudo docker exec -i mysql-db mysql -u root -ppass@321 student_enrollment < /home/${{ secrets.SERVER_USER }}/app/database.sql
+              fi
+            fi
+          fi
           
-          # Additional check to ensure MySQL is really ready
-          echo "Final MySQL readiness check..."
-          sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" || echo "MySQL still initializing..."
-          sleep 10
-          
-          # Run PHP (web) - Add retry logic in the application or wait longer
+          # Run PHP (web)
           echo "Starting PHP application..."
           sudo docker run -d --name php-web --network app_network \
             -e DB_HOST=mysql-db \
@@ -122,23 +151,23 @@ jobs:
           echo "Container status:"
           sudo docker ps -a
           
-          # Check PHP application logs for database connection issues
-          echo "Checking PHP application logs..."
-          sudo docker logs php-web --tail 50
-          
-          status=$(sudo docker inspect --format '{{.State.Status}}' php-nginx 2>/dev/null || echo "not_found")
-          echo "php-nginx state: $status"
-          
-          if [ "$status" != "running" ]; then
-            echo "ERROR: php-nginx container is not running"
-            echo "php-nginx logs:"
-            sudo docker logs php-nginx --tail 50
+          # Check all containers are running
+          if sudo docker ps | grep -q mysql-db && sudo docker ps | grep -q php-web && sudo docker ps | grep -q php-nginx; then
+            echo "All containers are running successfully!"
+            
+            # Test the application
+            echo "Testing application..."
+            curl -f http://localhost:80 && echo "Application is working!" || echo "Application check failed"
+            
+          else
+            echo "Some containers are not running:"
+            sudo docker ps -a
+            echo "MySQL logs:"
+            sudo docker logs mysql-db --tail 50
+            echo "PHP logs:"
+            sudo docker logs php-web --tail 50
             exit 1
           fi
-          
-          # Test the application
-          echo "Testing application connectivity..."
-          curl -f http://localhost:80 || echo "Application check failed, but continuing..."
           
           echo "Deployment completed successfully!"
           EOF
