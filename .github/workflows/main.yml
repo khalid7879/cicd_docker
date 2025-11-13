@@ -1,173 +1,54 @@
-name: CI/CD for PHP App
+version: '3.8'
 
-on:
-  push:
-    branches:
-      - main
+services:
+  db:
+    image: mysql:8.0.35      # 
+    container_name: mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: pass@321
+      MYSQL_DATABASE: student_enrollment
+    volumes:
+      - db_data:/var/lib/mysql
+      # - ./database.sql:/docker-entrypoint-initdb.d/database.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -ppass@321 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - app_network
 
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  web:
+    build:
+      context: .
+      dockerfile: php.Dockerfile
+    environment:
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: pass@321
+      DB_NAME: student_enrollment
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app_network
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+  nginx:
+    build: .
+    ports:
+      - "80:80"
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - app_network
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+volumes:
+  db_data:
 
-      - name: Login to Docker Hub
-        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-      - name: Build and Push Docker Images
-        run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/php-nginx -f Dockerfile .
-          docker push ${{ secrets.DOCKER_USERNAME }}/php-nginx
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/php-web -f php.Dockerfile .
-          docker push ${{ secrets.DOCKER_USERNAME }}/php-web
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build-and-push
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
-      - name: Deploy to CentOS Stream 8 Server
-        run: |
-          echo "${{ secrets.SERVER_SSH_KEY }}" > private_key.pem
-          chmod 600 private_key.pem
-          
-          # Test SSH connection on port 54658
-          echo "Testing SSH connection on port 54658..."
-          ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful!'"
-          
-          # Copy files on port 54658
-          echo "Copying database file..."
-          scp -o StrictHostKeyChecking=no -i private_key.pem -P 54658 database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
-          
-          # Deploy on port 54658
-          echo "Starting deployment..."
-          ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
-          set -euo pipefail
-          
-          echo "Deploying on $(hostname)..."
-          
-          # Login to Docker Hub
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-          
-          # Ensure network and app dir
-          sudo docker network create app_network || true
-          mkdir -p /home/${{ secrets.SERVER_USER }}/app
-          
-          # Stop & remove existing containers
-          sudo docker rm -f php-nginx php-web mysql-db || true
-          
-          # Clean up any existing volumes that might cause issues
-          sudo docker volume rm db_data || true
-          
-          # Pull latest images
-          echo "Pulling latest Docker images..."
-          sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-web
-          sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-nginx
-          
-          # First, verify the database file exists and is valid
-          echo "Checking database file..."
-          ls -la /home/${{ secrets.SERVER_USER }}/app/database.sql
-          file /home/${{ secrets.SERVER_USER }}/app/database.sql
-          
-          # Run MySQL WITHOUT the init script first to test
-          echo "Starting MySQL database (without init script)..."
-          sudo docker run -d --name mysql-db --network app_network \
-            -v db_data:/var/lib/mysql \
-            -e MYSQL_ROOT_PASSWORD=pass@321 \
-            -e MYSQL_DATABASE=student_enrollment \
-            -p 3306:3306 \
-            --restart unless-stopped \
-            mysql:8.0
-          
-          # Wait for MySQL to be ready
-          echo "Waiting for MySQL to start..."
-          sleep 30
-          
-          # Check if MySQL is running
-          if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" 2>/dev/null; then
-            echo "MySQL is running successfully"
-            
-            # If we have a database file, import it manually
-            if [ -f /home/${{ secrets.SERVER_USER }}/app/database.sql ]; then
-              echo "Importing database schema..."
-              sudo docker exec -i mysql-db mysql -u root -ppass@321 student_enrollment < /home/${{ secrets.SERVER_USER }}/app/database.sql
-              echo "Database imported successfully"
-            fi
-            
-          else
-            echo "MySQL failed to start. Trying alternative approach..."
-            
-            # Stop the container and try with different approach
-            sudo docker rm -f mysql-db
-            
-            # Try MySQL with init script but simpler approach
-            echo "Starting MySQL with init script..."
-            sudo docker run -d --name mysql-db --network app_network \
-              -v db_data:/var/lib/mysql \
-              -e MYSQL_ROOT_PASSWORD=pass@321 \
-              -e MYSQL_DATABASE=student_enrollment \
-              -p 3306:3306 \
-              --restart unless-stopped \
-              mysql:8.0
-              
-            sleep 40
-            
-            # Import database manually if MySQL is running
-            if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" 2>/dev/null; then
-              if [ -f /home/${{ secrets.SERVER_USER }}/app/database.sql ]; then
-                echo "Importing database manually..."
-                sudo docker exec -i mysql-db mysql -u root -ppass@321 student_enrollment < /home/${{ secrets.SERVER_USER }}/app/database.sql
-              fi
-            fi
-          fi
-          
-          # Run PHP (web)
-          echo "Starting PHP application..."
-          sudo docker run -d --name php-web --network app_network \
-            -e DB_HOST=mysql-db \
-            -e DB_USER=root \
-            -e DB_PASSWORD=pass@321 \
-            -e DB_NAME=student_enrollment \
-            --restart unless-stopped \
-            ${{ secrets.DOCKER_USERNAME }}/php-web
-          
-          # Run Nginx
-          echo "Starting Nginx..."
-          sudo docker run -d --name php-nginx --network app_network \
-            -p 80:80 \
-            --restart unless-stopped \
-            ${{ secrets.DOCKER_USERNAME }}/php-nginx
-          
-          # Wait and check status
-          sleep 15
-          echo "Container status:"
-          sudo docker ps -a
-          
-          # Check all containers are running
-          if sudo docker ps | grep -q mysql-db && sudo docker ps | grep -q php-web && sudo docker ps | grep -q php-nginx; then
-            echo "All containers are running successfully!"
-            
-            # Test the application
-            echo "Testing application..."
-            curl -f http://localhost:80 && echo "Application is working!" || echo "Application check failed"
-            
-          else
-            echo "Some containers are not running:"
-            sudo docker ps -a
-            echo "MySQL logs:"
-            sudo docker logs mysql-db --tail 50
-            echo "PHP logs:"
-            sudo docker logs php-web --tail 50
-            exit 1
-          fi
-          
-          echo "Deployment completed successfully!"
-          EOF
+networks:
+  app_network:
+    driver: bridge
