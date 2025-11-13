@@ -3,7 +3,7 @@ name: CI/CD for PHP App
 on:
   push:
     branches:
-      - main  # Trigger pipeline on push to main
+      - main
 
 jobs:
   build-and-push:
@@ -21,10 +21,8 @@ jobs:
 
       - name: Build and Push Docker Images
         run: |
-          # Build Nginx image
           docker build -t ${{ secrets.DOCKER_USERNAME }}/php-nginx -f Dockerfile .
           docker push ${{ secrets.DOCKER_USERNAME }}/php-nginx
-          # Build PHP (web) image
           docker build -t ${{ secrets.DOCKER_USERNAME }}/php-web -f php.Dockerfile .
           docker push ${{ secrets.DOCKER_USERNAME }}/php-web
 
@@ -41,17 +39,17 @@ jobs:
           echo "${{ secrets.SERVER_SSH_KEY }}" > private_key.pem
           chmod 600 private_key.pem
           
-          # Test SSH connection first
-          echo "Testing SSH connection..."
-          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful!'"
+          # Test SSH connection on port 54658
+          echo "Testing SSH connection on port 54658..."
+          ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful!'"
           
-          # Copy files
+          # Copy files on port 54658
           echo "Copying database file..."
-          scp -o StrictHostKeyChecking=no -i private_key.pem database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
+          scp -o StrictHostKeyChecking=no -i private_key.pem -P 54658 database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
           
-          # Deploy
+          # Deploy on port 54658
           echo "Starting deployment..."
-          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
           set -euo pipefail
           
           echo "Deploying on $(hostname)..."
