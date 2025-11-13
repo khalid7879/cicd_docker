@@ -1,4 +1,4 @@
-name: CI/CD for PHP 
+name: CI/CD for PHP CRM
 
 on:
   push:
@@ -58,43 +58,60 @@ jobs:
           sudo docker network create app_network || true
           mkdir -p /home/${{ secrets.SERVER_USER }}/app
 
-          # Stop & remove old containers
+          # Stop & remove old containers (keep volumes)
           sudo docker rm -f php-nginx php-web mysql-db || true
 
-          # Conditional MySQL init (preserve existing data)
-          if ! sudo docker volume inspect db_data >/dev/null 2>&1; then
-            echo "Data volume not found. Initializing MySQL with database.sql..."
-            sudo docker volume create db_data
-            INIT_SQL="-v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql:ro"
-          else
-            echo "Data volume exists. Mounting database.sql to ensure missing tables and seed data..."
-            INIT_SQL="-v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql:ro"
-          fi
-
-          # Start MySQL container
+          # Start MySQL container (ALWAYS mount the SQL file)
           sudo docker run -d --name mysql-db --network app_network \
             -v db_data:/var/lib/mysql \
-            $INIT_SQL \
+            -v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql:ro \
             -e MYSQL_ROOT_PASSWORD=pass@321 \
             -e MYSQL_DATABASE=student_enrollment \
             -p 3306:3306 \
             --restart unless-stopped \
             mysql:8.0.35
 
-          # Wait for MySQL
+          # Wait for MySQL to be ready
           echo "Waiting for MySQL to initialize..."
-          for i in {1..20}; do
+          for i in {1..30}; do
             if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" >/dev/null 2>&1; then
               echo "MySQL ready!"
               break
             fi
-            echo "Waiting ($i/20)..."
+            echo "Waiting for MySQL ($i/30)..."
             sleep 5
           done
 
-          # Verify tables
-          echo "Verifying tables in student_enrollment..."
-          sudo docker exec mysql-db mysql -u root -ppass@321 -e "SHOW TABLES IN student_enrollment;"
+          # FORCE CREATE TABLES (whether volume exists or not)
+          echo "Ensuring database and tables exist..."
+          sudo docker exec mysql-db mysql -u root -ppass@321 -e "
+          CREATE DATABASE IF NOT EXISTS student_enrollment;
+          USE student_enrollment;
+          CREATE TABLE IF NOT EXISTS students (
+            id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(50) NOT NULL,
+            email VARCHAR(100),
+            reg_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          );"
+
+          # Check if table is empty and insert sample data if needed
+          echo "Checking if sample data needs to be inserted..."
+          COUNT=$(sudo docker exec mysql-db mysql -u root -ppass@321 -sN -e "USE student_enrollment; SELECT COUNT(*) FROM students;")
+          if [ "$COUNT" -eq 0 ]; then
+            echo "Inserting sample data..."
+            sudo docker exec mysql-db mysql -u root -ppass@321 -e "
+            USE student_enrollment;
+            INSERT INTO students (name, email) VALUES
+            ('Khalid Hasan', 'khalidhasantalukder5@gmail.com'),
+            ('John Doe', 'john.doe@example.com'),
+            ('Jane Smith', 'jane.smith@example.com');"
+          fi
+
+          # Verify tables and data
+          echo "Verifying database setup..."
+          sudo docker exec mysql-db mysql -u root -ppass@321 -e "SHOW DATABASES;"
+          sudo docker exec mysql-db mysql -u root -ppass@321 -e "USE student_enrollment; SHOW TABLES;"
+          sudo docker exec mysql-db mysql -u root -ppass@321 -e "USE student_enrollment; SELECT * FROM students;"
 
           # Start PHP Web container
           sudo docker run -d --name php-web --network app_network \
