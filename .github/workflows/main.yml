@@ -1,4 +1,4 @@
-name: CI/CD for PHP App
+name: CI/CD for PHP CRM
 
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
 
-      - name: Deploy to CentOS Stream 8 Server
+      - name: Deploy to CentOS Server
         run: |
           echo "${{ secrets.SERVER_SSH_KEY }}" > private_key.pem
           chmod 600 private_key.pem
@@ -42,42 +42,57 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
           set -euo pipefail
 
-          echo "Deploying to $(hostname)..."
+          echo "Deploying on $(hostname)..."
 
+          # Docker login
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
+          # Create network and app folder
           sudo docker network create app_network || true
           mkdir -p /home/${{ secrets.SERVER_USER }}/app
 
+          # Stop & remove old containers
           sudo docker rm -f php-nginx php-web mysql-db || true
-          sudo docker volume rm db_data || true
 
-          echo "Pulling latest images..."
-          sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-web
-          sudo docker pull ${{ secrets.DOCKER_USERNAME }}/php-nginx
-          sudo docker pull mysql:8.0.35   # 👈 use stable compatible MySQL version
+          # Copy database.sql to server
+          scp -o StrictHostKeyChecking=no -i private_key.pem -P 54658 database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
 
-          echo "Starting MySQL..."
+          # Conditional MySQL init (preserve existing data)
+          if ! sudo docker volume inspect db_data >/dev/null 2>&1; then
+            echo "Data volume not found. Initializing MySQL with database.sql..."
+            sudo docker volume create db_data
+            INIT_SQL="-v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql:ro"
+          else
+            echo "Data volume exists. Mounting database.sql to ensure missing tables and seed data..."
+            INIT_SQL="-v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql:ro"
+          fi
+
+          # Start MySQL container
           sudo docker run -d --name mysql-db --network app_network \
             -v db_data:/var/lib/mysql \
+            $INIT_SQL \
             -e MYSQL_ROOT_PASSWORD=pass@321 \
             -e MYSQL_DATABASE=student_enrollment \
             -p 3306:3306 \
             --restart unless-stopped \
             mysql:8.0.35
 
-          echo "Waiting for MySQL to be ready..."
-          sleep 30
+          # Wait for MySQL
+          echo "Waiting for MySQL to initialize..."
+          for i in {1..20}; do
+            if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" >/dev/null 2>&1; then
+              echo "MySQL ready!"
+              break
+            fi
+            echo "Waiting ($i/20)..."
+            sleep 5
+          done
 
-          if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" 2>/dev/null; then
-            echo "MySQL started successfully"
-          else
-            echo "MySQL failed to start"
-            sudo docker logs mysql-db
-            exit 1
-          fi
+          # Verify tables
+          echo "Verifying tables in student_enrollment..."
+          sudo docker exec mysql-db mysql -u root -ppass@321 -e "SHOW TABLES IN student_enrollment;"
 
-          echo "Starting PHP web container..."
+          # Start PHP Web container
           sudo docker run -d --name php-web --network app_network \
             -e DB_HOST=mysql-db \
             -e DB_USER=root \
@@ -86,12 +101,14 @@ jobs:
             --restart unless-stopped \
             ${{ secrets.DOCKER_USERNAME }}/php-web
 
-          echo "Starting Nginx..."
+          # Start Nginx container
           sudo docker run -d --name php-nginx --network app_network \
             -p 80:80 \
             --restart unless-stopped \
             ${{ secrets.DOCKER_USERNAME }}/php-nginx
 
+          # Final check
           sleep 10
           sudo docker ps -a
+
           EOF
