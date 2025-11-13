@@ -27,7 +27,7 @@ function connectWithRetry($host, $username, $password, $database, $maxRetries = 
 // Usage
 try {
     $conn = connectWithRetry("mysql-db", "root", "pass@321", "student_enrollment", 10, 5);
-    echo "Connected successfully";
+    // Removed: echo "Connected successfully";
 } catch (Exception $e) {
     die("Connection failed: " . $e->getMessage());
 }
