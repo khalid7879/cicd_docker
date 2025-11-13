@@ -1,4 +1,4 @@
-name: CI/CD for PHP CRM
+name: CI/CD for PHP 
 
 on:
   push:
@@ -34,11 +34,18 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
 
-      - name: Deploy to CentOS Server
+      - name: Setup SSH Key
         run: |
           echo "${{ secrets.SERVER_SSH_KEY }}" > private_key.pem
           chmod 600 private_key.pem
 
+      - name: Copy database.sql to Server
+        run: |
+          scp -o StrictHostKeyChecking=no -i private_key.pem -P 54658 \
+            database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
+
+      - name: Deploy to CentOS Server
+        run: |
           ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
           set -euo pipefail
 
@@ -53,9 +60,6 @@ jobs:
 
           # Stop & remove old containers
           sudo docker rm -f php-nginx php-web mysql-db || true
-
-          # Copy database.sql to server
-          scp -o StrictHostKeyChecking=no -i private_key.pem -P 54658 database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
 
           # Conditional MySQL init (preserve existing data)
           if ! sudo docker volume inspect db_data >/dev/null 2>&1; then
@@ -110,5 +114,6 @@ jobs:
           # Final check
           sleep 10
           sudo docker ps -a
+          echo "Deployment completed successfully!"
 
           EOF
