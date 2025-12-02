@@ -7,7 +7,7 @@
 <body>
 
 <div class="container">
-  <h2>Student Enrollment kayes</h2>
+  <h2>Student Enrollment</h2>
   <form action="enroll.php" method="post">
     <label for="name">Name:</label>
     <input type="text" id="name" name="name" required>
