@@ -19,12 +19,21 @@ jobs:
       - name: Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: Build and Push Docker Images
+      - name: Build and Push Docker Images (NO CACHE + UNIQUE TAG)
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/php-nginx -f Dockerfile .
-          docker push ${{ secrets.DOCKER_USERNAME }}/php-nginx
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/php-web -f php.Dockerfile .
-          docker push ${{ secrets.DOCKER_USERNAME }}/php-web
+          COMMIT_SHA=$(echo $GITHUB_SHA | cut -c1-7)
+
+          # Build php-nginx
+          docker build --no-cache -t ${{ secrets.DOCKER_USERNAME }}/php-nginx:latest -t ${{ secrets.DOCKER_USERNAME }}/php-nginx:$COMMIT_SHA -f Dockerfile .
+          docker push ${{ secrets.DOCKER_USERNAME }}/php-nginx:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/php-nginx:$COMMIT_SHA
+
+          # Build php-web
+          docker build --no-cache -t ${{ secrets.DOCKER_USERNAME }}/php-web:latest -t ${{ secrets.DOCKER_USERNAME }}/php-web:$COMMIT_SHA -f php.Dockerfile .
+          docker push ${{ secrets.DOCKER_USERNAME }}/php-web:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/php-web:$COMMIT_SHA
+
+          echo "IMAGE_TAG=$COMMIT_SHA" >> $GITHUB_ENV
 
   deploy:
     runs-on: ubuntu-latest
@@ -39,98 +48,36 @@ jobs:
           echo "${{ secrets.SERVER_SSH_KEY }}" > private_key.pem
           chmod 600 private_key.pem
 
-      - name: Copy database.sql to Server
+      - name: Deploy to Server
         run: |
-          scp -o StrictHostKeyChecking=no -i private_key.pem -P 54658 \
-            database.sql ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USER }}/app/database.sql
-
-      - name: Deploy to CentOS Server
-        run: |
-          ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no -i private_key.pem -p 54658 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
           set -euo pipefail
 
-          echo "Deploying on $(hostname)..."
+          echo "Deploying on server..."
 
-          # Docker login
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          docker login -u "${{ secrets.DOCKER_USERNAME }}" -p "${{ secrets.DOCKER_PASSWORD }}"
 
-          # Create network and app folder
-          sudo docker network create app_network || true
-          mkdir -p /home/${{ secrets.SERVER_USER }}/app
+          # Pull newest images
+          docker pull ${{ secrets.DOCKER_USERNAME }}/php-web:latest
+          docker pull ${{ secrets.DOCKER_USERNAME }}/php-nginx:latest
 
-          # Stop & remove old containers (keep volumes)
-          sudo docker rm -f php-nginx php-web mysql-db || true
+          # Remove old containers
+          docker rm -f php-nginx php-web || true
 
-          # Start MySQL container (ALWAYS mount the SQL file)
-          sudo docker run -d --name mysql-db --network app_network \
-            -v db_data:/var/lib/mysql \
-            -v /home/${{ secrets.SERVER_USER }}/app/database.sql:/docker-entrypoint-initdb.d/database.sql:ro \
-            -e MYSQL_ROOT_PASSWORD=pass@321 \
-            -e MYSQL_DATABASE=student_enrollment \
-            -p 3306:3306 \
-            --restart unless-stopped \
-            mysql:8.0.35
-
-          # Wait for MySQL to be ready
-          echo "Waiting for MySQL to initialize..."
-          for i in {1..30}; do
-            if sudo docker exec mysql-db mysql -u root -ppass@321 -e "SELECT 1;" >/dev/null 2>&1; then
-              echo "MySQL ready!"
-              break
-            fi
-            echo "Waiting for MySQL ($i/30)..."
-            sleep 5
-          done
-
-          # FORCE CREATE TABLES (whether volume exists or not)
-          echo "Ensuring database and tables exist..."
-          sudo docker exec mysql-db mysql -u root -ppass@321 -e "
-          CREATE DATABASE IF NOT EXISTS student_enrollment;
-          USE student_enrollment;
-          CREATE TABLE IF NOT EXISTS students (
-            id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(50) NOT NULL,
-            email VARCHAR(100),
-            reg_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-          );"
-
-          # Check if table is empty and insert sample data if needed
-          echo "Checking if sample data needs to be inserted..."
-          COUNT=$(sudo docker exec mysql-db mysql -u root -ppass@321 -sN -e "USE student_enrollment; SELECT COUNT(*) FROM students;")
-          if [ "$COUNT" -eq 0 ]; then
-            echo "Inserting sample data..."
-            sudo docker exec mysql-db mysql -u root -ppass@321 -e "
-            USE student_enrollment;
-            INSERT INTO students (name, email) VALUES
-            ('Khalid Hasan', 'khalidhasantalukder5@gmail.com'),
-            ('John Doe', 'john.doe@example.com'),
-            ('Jane Smith', 'jane.smith@example.com');"
-          fi
-
-          # Verify tables and data
-          echo "Verifying database setup..."
-          sudo docker exec mysql-db mysql -u root -ppass@321 -e "SHOW DATABASES;"
-          sudo docker exec mysql-db mysql -u root -ppass@321 -e "USE student_enrollment; SHOW TABLES;"
-          sudo docker exec mysql-db mysql -u root -ppass@321 -e "USE student_enrollment; SELECT * FROM students;"
-
-          # Start PHP Web container
-          sudo docker run -d --name php-web --network app_network \
+          # Recreate with fresh images
+          docker run -d --name php-web --network app_network \
             -e DB_HOST=mysql-db \
             -e DB_USER=root \
             -e DB_PASSWORD=pass@321 \
             -e DB_NAME=student_enrollment \
             --restart unless-stopped \
-            ${{ secrets.DOCKER_USERNAME }}/php-web
+            ${{ secrets.DOCKER_USERNAME }}/php-web:latest
 
-          # Start Nginx container
-          sudo docker run -d --name php-nginx --network app_network \
+          docker run -d --name php-nginx --network app_network \
             -p 80:80 \
             --restart unless-stopped \
-            ${{ secrets.DOCKER_USERNAME }}/php-nginx
+            ${{ secrets.DOCKER_USERNAME }}/php-nginx:latest
 
-          # Final check
-          sleep 10
-          sudo docker ps -a
-          echo "Deployment completed successfully!"
-
+          docker ps -a
+          echo "Deployment completed!"
           EOF
