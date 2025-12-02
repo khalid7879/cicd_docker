@@ -20,7 +20,7 @@
 </div>
 
 <div class="container">
-  <h2>Search Student</h2>
+  <h2>Find Student</h2>
   <form action="search.php" method="get">
     <label for="search_name">Name:</label>
     <input type="text" id="search_name" name="search_name" required>
