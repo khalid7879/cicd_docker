@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Student Enrollment Data</title>
+  <title>Student Enrollment</title>
   <link rel="stylesheet" type="text/css" href="style.css">
 </head>
 <body>
